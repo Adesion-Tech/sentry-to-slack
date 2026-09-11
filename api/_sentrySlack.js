@@ -16,6 +16,45 @@ function fmtISO(x) {
     }
 }
 
+function firstText(...vals) {
+    return vals.find(v => typeof v === "string" && v.trim().length);
+}
+
+// Escapes characters Slack mrkdwn treats as markup so user-authored feedback
+// text can never form mentions or links (<@user>, <#channel>, <url|label>).
+function escapeMrkdwn(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+function clampText(s, limit) {
+    if (s.length <= limit) return s;
+    return s.slice(0, limit).replace(/&[a-zA-Z]{0,4}$/, "").trimEnd() + " …";
+}
+
+const SLACK_BLOCK_TEXT_LIMIT = 3000; // Slack rejects section text longer than this
+const FEEDBACK_TEXT_LIMIT = 500;
+
+function quoteFeedbackMessage(message) {
+    return message
+        .replace(/\r\n?/g, "\n")
+        .split("\n")
+        .map(line => `> ${escapeMrkdwn(line)}`)
+        .join("\n");
+}
+
+// Sentry allows feedback messages up to ~4000 chars, past Slack's section limit.
+function buildFeedbackSectionText(feedbackFrom, message) {
+    const header = `:speech_balloon: *Feedback${feedbackFrom ? ` from ${feedbackFrom}` : ""}:*`;
+    let text = `${header}\n${quoteFeedbackMessage(message)}`;
+    if (text.length > SLACK_BLOCK_TEXT_LIMIT) {
+        const note = "\n> _(truncated — full message in Sentry)_";
+        text = text.slice(0, SLACK_BLOCK_TEXT_LIMIT - note.length)
+            .replace(/&[a-zA-Z]{0,4}$/, "") // drop a partially-cut mrkdwn entity (e.g. "&am")
+            + note;
+    }
+    return text;
+}
+
 const LEVEL_ALIAS = {
     fatal: ":fire:",
     error: ":rotating_light:",
@@ -43,9 +82,12 @@ export function isFeedback(req) {
 
     return Boolean(
         category === "feedback" ||
+        String(issue?.issueType || "").toLowerCase() === "feedback" ||
         ev?.contexts?.feedback ||
+        ev?.user_report ||
         ev?.type === "feedback" ||
         issue?.title === "User Feedback" ||
+        String(issue?.title || "").startsWith("User Feedback:") ||
         (issue?.metadata?.contact_email && issue?.metadata?.message)
     );
 }
@@ -59,9 +101,45 @@ export function resolveChannel(req, defaultChannel) {
 }
 
 export function formatSlackMessage(body) {
-    // --- Normalization for both Sentry event webhooks and Issue API responses ---
+    // --- Normalization for Sentry event webhooks, Issue API responses, and
+    // integration-platform issue webhooks (issue at body.data.issue) ---
     const ev = body?.data?.event ?? {};     // event-style
-    const issue = (!body?.data?.event && body?.id && body?.title) ? body : null; // issue-style
+    const issue =
+        body?.data?.issue ??                // integration-platform issue webhook
+        ((!body?.data?.event && body?.id && body?.title) ? body : null); // issue-style
+
+    // --- User Feedback: the reporter's original message and identity ---
+    // The message lives at event.contexts.feedback.message (feedback events),
+    // event.user_report.comments (crash-report feedback), or in feedback-issue
+    // metadata — see https://docs.sentry.io/product/user-feedback/
+    const fbCtx = ev?.contexts?.feedback ?? ev?.user_report ?? null;
+    const issueIsFeedback = Boolean(
+        String(issue?.issueCategory || issue?.category || "").toLowerCase() === "feedback" ||
+        String(issue?.issueType || "").toLowerCase() === "feedback" ||
+        issue?.title === "User Feedback" ||
+        String(issue?.title || "").startsWith("User Feedback:") ||
+        (issue?.metadata?.contact_email && issue?.metadata?.message)
+    );
+
+    const feedbackMessage = firstText(
+        fbCtx?.message,
+        fbCtx?.comments,
+        issueIsFeedback ? issue?.metadata?.message : undefined,
+        issueIsFeedback ? issue?.metadata?.value : undefined,
+    );
+    const feedbackName = firstText(
+        fbCtx?.name,
+        issueIsFeedback ? issue?.metadata?.name : undefined,
+    );
+    const feedbackEmail = firstText(
+        fbCtx?.contact_email,
+        fbCtx?.email,
+        issueIsFeedback ? issue?.metadata?.contact_email : undefined,
+    );
+    const feedbackFromRaw =
+        (feedbackName && feedbackEmail) ? `${feedbackName} (${feedbackEmail})`
+            : (feedbackName || feedbackEmail || "");
+    const feedbackFrom = escapeMrkdwn(feedbackFromRaw);
 
     const level =
         (ev.level ||
@@ -82,7 +160,7 @@ export function formatSlackMessage(body) {
         ev.title ||
         ev.message ||
         ev?.logentry?.formatted ||
-        "Sentry Event";
+        (feedbackMessage ? "User Feedback" : "Sentry Event");
 
     const culprit =
         issue?.culprit ||
@@ -212,8 +290,14 @@ export function formatSlackMessage(body) {
         ),
     ].join("\n");
 
+    const feedbackSection = feedbackMessage ? {
+        type: "section",
+        text: {type: "mrkdwn", text: buildFeedbackSectionText(feedbackFrom, feedbackMessage)},
+    } : null;
+
     const blocks = [
         {type: "section", text: {type: "mrkdwn", text: headerLines}},
+        ...(feedbackSection ? [feedbackSection] : []),
         ...(fields.length ? [{type: "section", fields}] : []),
         ...(contextItems.length
             ? [{type: "context", elements: [{type: "mrkdwn", text: contextItems.join("  •  ")}]}]
@@ -224,10 +308,11 @@ export function formatSlackMessage(body) {
             : []),
     ];
 
-    return {
-        text: `${baseEmoji} ${level.toUpperCase()}: ${title}`,
-        blocks,
-    };
+    const text = feedbackMessage
+        ? `:speech_balloon: User Feedback${feedbackFrom ? ` from ${feedbackFrom}` : ""}: ${clampText(escapeMrkdwn(feedbackMessage.replace(/\r\n?/g, "\n")), FEEDBACK_TEXT_LIMIT)}`
+        : `${baseEmoji} ${level.toUpperCase()}: ${title}`;
+
+    return {text, blocks};
 }
 
 export async function postToSlack(channel, payload, attempt = 0) {
