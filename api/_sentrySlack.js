@@ -101,6 +101,81 @@ export function resolveChannel(req, defaultChannel) {
     return feedbackChannel && isFeedback(req) ? feedbackChannel : defaultChannel;
 }
 
+// --- Feedback screenshots (optional, needs SENTRY_AUTH_TOKEN) ---
+// Screenshots submitted with the feedback widget never travel inside the
+// webhook payload — Sentry stores them as event attachments behind its API
+// (https://docs.sentry.io/api/events/list-an-events-attachments/). We resolve
+// the API coordinates from the webhook's own URLs, list the screenshot
+// attachments, and download the first one.
+function parseSentryApiContext(body) {
+    const ev = body?.data?.event ?? {};
+    const issue =
+        body?.data?.issue ??
+        ((!body?.data?.event && body?.id && body?.title) ? body : null);
+
+    // Event-style payloads carry the event's own API url:
+    // https://sentry.io/api/0/projects/{org}/{project}/events/{event_id}/
+    if (ev.event_id) {
+        const m = /^(https:\/\/[^/]+)\/api\/0\/projects\/([^/]+)\/([^/]+)\/events\//.exec(String(ev.url || ""));
+        if (m) return {apiBase: m[1], org: m[2], project: m[3], eventId: ev.event_id};
+    }
+
+    // Feedback issues link to the feedback view, which carries the refs in
+    // its query string:
+    // https://{org}.sentry.io/issues/feedback/?projectSlug={slug}&eventId={id}
+    // (https://docs.sentry.io/platforms/javascript/user-feedback/)
+    for (const u of [issue?.permalink, issue?.web_url]) {
+        if (typeof u !== "string" || !u) continue;
+        let parsed;
+        try {
+            parsed = new URL(u);
+        } catch {
+            continue;
+        }
+        const eventId = parsed.searchParams.get("eventId") || parsed.searchParams.get("event_id");
+        const project =
+            parsed.searchParams.get("projectSlug") ||
+            parsed.searchParams.get("project_slug") ||
+            issue?.project?.slug;
+        if (!eventId || !project) continue;
+        if (parsed.hostname.endsWith(".sentry.io")) {
+            return {
+                apiBase: "https://sentry.io",
+                org: parsed.hostname.slice(0, -".sentry.io".length),
+                project, eventId,
+            };
+        }
+        // Self-hosted: the org only appears in the issue API url
+        const orgMatch = /\/api\/0\/organizations\/([^/]+)\//.exec(String(issue?.url || ""));
+        if (orgMatch) return {apiBase: parsed.origin, org: orgMatch[1], project, eventId};
+    }
+    return null;
+}
+
+async function fetchFeedbackScreenshot(body) {
+    const token = process.env.SENTRY_AUTH_TOKEN;
+    if (!token || !isFeedback({body})) return null;
+
+    const ctx = parseSentryApiContext(body);
+    if (!ctx) return null;
+
+    const auth = {Authorization: `Bearer ${token}`};
+    const base = `${ctx.apiBase}/api/0/projects/${ctx.org}/${ctx.project}/events/${ctx.eventId}/attachments`;
+
+    const listResp = await fetch(`${base}/?query=is:screenshot`, {headers: auth});
+    if (!listResp.ok) throw new Error(`Sentry attachments list failed: ${listResp.status}`);
+    const attachments = await listResp.json().catch(() => null);
+    if (!Array.isArray(attachments) || attachments.length === 0) return null;
+
+    const fileResp = await fetch(`${base}/${attachments[0].id}/?download=1`, {headers: auth});
+    if (!fileResp.ok) throw new Error(`Sentry attachment download failed: ${fileResp.status}`);
+
+    return {
+        buffer: Buffer.from(await fileResp.arrayBuffer()),
+        filename: attachments[0].name || "screenshot.png",
+    };
+}
+
 export function formatSlackMessage(body) {
     // --- Normalization for Sentry event webhooks, Issue API responses, and
     // integration-platform issue webhooks (issue at body.data.issue) ---
@@ -354,6 +429,76 @@ export async function postToSlack(channel, payload, attempt = 0) {
     }
 
     return data;
+}
+
+// Slack image blocks only render publicly-hosted image_url values, and
+// files.uploadV2 exists only inside Slack's SDKs — over plain HTTP the
+// documented flow is getUploadURLExternal → POST the bytes →
+// completeUploadExternal (https://docs.slack.dev/messaging/working-with-files/).
+// The image rides in the completed upload's own blocks via a slack_file
+// reference, so the file and the notification land as one message.
+async function postToSlackWithScreenshot(channel, payload, screenshot) {
+    const token = process.env.SLACK_APP_AUTH_TOKEN;
+    if (!token) throw new Error("Missing SLACK_APP_AUTH_TOKEN");
+
+    const urlResp = await fetch("https://slack.com/api/files.getUploadURLExternal", {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+            filename: screenshot.filename,
+            length: screenshot.buffer.length,
+            alt_txt: "Feedback screenshot",
+        }),
+    });
+    const urlData = await urlResp.json().catch(() => ({}));
+    if (!urlData.ok) throw new Error(`Slack getUploadURLExternal error: ${urlData.error || urlResp.statusText}`);
+
+    const uploadResp = await fetch(urlData.upload_url, {
+        method: "POST",
+        headers: {"Content-Type": "application/octet-stream"},
+        body: screenshot.buffer,
+    });
+    if (!uploadResp.ok) throw new Error(`Slack file upload failed: ${uploadResp.status}`);
+
+    // Show the image right after the quoted feedback message
+    const imageBlock = {type: "image", slack_file: {id: urlData.file_id}, alt_text: "Feedback screenshot"};
+    const blocks = [...payload.blocks];
+    const feedbackIdx = blocks.findIndex(
+        b => b.type === "section" && String(b.text?.text || "").startsWith(":speech_balloon:")
+    );
+    blocks.splice(feedbackIdx >= 0 ? feedbackIdx + 1 : 1, 0, imageBlock);
+
+    const doneResp = await fetch("https://slack.com/api/files.completeUploadExternal", {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+            channel_id: channel,
+            files: [{id: urlData.file_id, title: "Feedback screenshot"}],
+            blocks,
+        }),
+    });
+    const doneData = await doneResp.json().catch(() => ({}));
+    if (!doneData.ok) throw new Error(`Slack completeUploadExternal error: ${doneData.error || doneResp.statusText}`);
+    return doneData;
+}
+
+// Entry point for the endpoint handlers. Screenshot failures fall back to the
+// plain post so they can never swallow the notification itself.
+export async function notifySlack(channel, body) {
+    const payload = formatSlackMessage(body || {});
+    try {
+        const screenshot = await fetchFeedbackScreenshot(body || {});
+        if (screenshot) return await postToSlackWithScreenshot(channel, payload, screenshot);
+    } catch (err) {
+        console.error("feedback screenshot skipped:", err);
+    }
+    return postToSlack(channel, payload);
 }
 
 export function methodGuard(req, res) {

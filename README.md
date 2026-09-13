@@ -14,6 +14,7 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
 1) **Create a Slack App** (if you don't have one), add the **Bot Token Scopes**:
    - `chat:write`
    - `chat:write.public` (only if posting to public channels your bot isn't in)
+   - `files:write` (only if you attach feedback screenshots — see `SENTRY_AUTH_TOKEN` below)
    - Invite the bot to the target channels.
 
 2) **Get the channel IDs**  
@@ -21,12 +22,15 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
 
 3) **Set Environment Variables in Vercel**  
    Project → *Settings* → *Environment Variables*:
-   - `SLACK_BOT_TOKEN` = `xoxb-...`
+   - `SLACK_APP_AUTH_TOKEN` = `xoxb-...`
    - `SLACK_CHANNEL_BACKEND` = `C0123ABCDE`
    - `SLACK_CHANNEL_FRONTEND` = `C0456FGHIJ`
    - `SLACK_CHANNEL_FEEDBACK` = `C0789KLMNO` *(optional)* — when set, Sentry **User Feedback** notifications
      are routed to this channel instead; when unset, everything goes to the backend/frontend channels
      as before. Feedback notifications include the reporter's original message.
+   - `SENTRY_AUTH_TOKEN` = `sntrys_...` *(optional)* — when set, screenshots submitted with the
+     feedback widget are fetched from the Sentry API (token needs the `project:read` scope) and
+     attached to the Slack notification; when unset, feedback notifications post without images.
 
 4) **Deploy and point Sentry Webhooks**
    - Backend Sentry project → Webhook URL: `https://<your-app>.vercel.app/api/sentry-backend`
