@@ -33,6 +33,7 @@ function clampText(s, limit) {
 
 const SLACK_BLOCK_TEXT_LIMIT = 3000; // Slack rejects section text longer than this
 const FEEDBACK_TEXT_LIMIT = 500;
+const FEEDBACK_SUBJECT_LIMIT = 100;
 
 function quoteFeedbackMessage(message) {
     return message
@@ -156,6 +157,16 @@ export function formatSlackMessage(body) {
         ev?.logentry?.formatted ||
         (feedbackMessage ? "User Feedback" : "Sentry Event");
 
+    // Sentry titles feedback issues "User Feedback[: subject]" — promote that
+    // to a dedicated header line instead of the generic "Title:" label.
+    const feedbackTitleMatch = /^User Feedback(?::\s*(.*))?$/i.exec(title);
+    const feedbackSubject = feedbackTitleMatch
+        ? (feedbackTitleMatch[1] ||
+            (feedbackMessage
+                ? clampText(escapeMrkdwn(feedbackMessage.split("\n")[0]), FEEDBACK_SUBJECT_LIMIT)
+                : ""))
+        : null;
+
     const culprit =
         issue?.culprit ||
         ev.culprit ||
@@ -274,7 +285,9 @@ export function formatSlackMessage(body) {
     // --- Header & detail sections ---
     const headerLines = [
         `*${baseEmoji}${statusEmoji ? " " + statusEmoji : ""}${escalatingEmoji} Sentry ${level.toUpperCase()}*${(status || substatus) ? `  •  _${[status, substatus].filter(Boolean).join(" / ")}_` : ""}`,
-        `*Title:* ${title}`,
+        (feedbackTitleMatch
+            ? (feedbackSubject ? `*User Feedback:* ${feedbackSubject}` : "*User Feedback*")
+            : `*Title:* ${title}`),
         ...(culprit ? [`*Culprit:* \`${culprit}\``] : []),
         ...(issue?.metadata?.filename || ev?.metadata?.filename || ev?.metadata?.function
                 ? [
