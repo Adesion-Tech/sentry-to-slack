@@ -131,15 +131,9 @@ export function formatSlackMessage(body) {
         fbCtx?.name,
         issueIsFeedback ? issue?.metadata?.name : undefined,
     );
-    const feedbackEmail = firstText(
-        fbCtx?.contact_email,
-        fbCtx?.email,
-        issueIsFeedback ? issue?.metadata?.contact_email : undefined,
-    );
-    const feedbackFromRaw =
-        (feedbackName && feedbackEmail) ? `${feedbackName} (${feedbackEmail})`
-            : (feedbackName || feedbackEmail || "");
-    const feedbackFrom = escapeMrkdwn(feedbackFromRaw);
+    // Deliberately name-only: the email is already sent with the message
+    // (event user context), so don't repeat it in the label.
+    const feedbackFrom = feedbackName ? escapeMrkdwn(feedbackName) : "";
 
     const level =
         (ev.level ||
