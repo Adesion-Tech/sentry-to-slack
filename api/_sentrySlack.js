@@ -522,7 +522,8 @@ async function notionFetch(path, body) {
 
 // Extracts the fields the Notion task needs. Mirrors the parsing in
 // formatSlackMessage but keeps data the Slack message deliberately doesn't
-// use (email, issue id, the page the feedback was submitted from).
+// use (email, issue id, the page the feedback was submitted from) and stores
+// project/environment as filterable task properties.
 function extractFeedbackInfo(body) {
     const ev = body?.data?.event ?? {};
     const issue =
@@ -555,6 +556,8 @@ function extractFeedbackInfo(body) {
         email: firstText(fbCtx?.contact_email, issue?.metadata?.contact_email, ev?.user?.email),
         sourceUrl: firstText(fbCtx?.url, ev?.request?.url, tag("url")),
         issueUrl: firstText(issue?.permalink, issue?.web_url, ev?.web_url),
+        project: firstText(issue?.project?.name, issue?.project?.slug, ev?.project_slug),
+        environment: firstText(issue?.environment, ev?.environment, tag("environment")),
     };
 }
 
@@ -601,6 +604,8 @@ function buildNotionPage(info) {
     if (info.issueId) properties["Sentry Issue ID"] = {rich_text: [textBlock(info.issueId)]};
     if (info.sourceUrl) properties["Source URL"] = {url: info.sourceUrl};
     if (reporter) properties.Reporter = {rich_text: [textBlock(reporter)]};
+    if (info.project) properties.Project = {rich_text: [textBlock(info.project)]};
+    if (info.environment) properties.Environment = {rich_text: [textBlock(info.environment)]};
 
     return {properties, children};
 }

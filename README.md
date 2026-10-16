@@ -39,10 +39,12 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
      every **User Feedback** notification is also created as a task in a Notion database. Create an
      internal integration at https://www.notion.so/my-integrations (needs *Insert content*
      capabilities) and add it to the target database (*•••* → *Add connections*).
-   - `NOTION_FEEDBACK_DB_ID` = `<database id>` *(optional)* — the database feedback tasks land in.
-     Its schema must contain: `Name` (title), `Status` (select with a `New` option),
-     `Sentry Issue ID` (rich text), `Source URL` (url), `Reporter` (rich text). Repeated webhooks
-     for the same feedback issue never duplicate the task (deduplicated by Sentry issue ID).
+- `NOTION_FEEDBACK_DB_ID` = `<database id>` *(optional)* — the database feedback tasks land in.
+      Its schema must contain: `Name` (title), `Status` (select with a `New` option),
+      `Sentry Issue ID` (rich text), `Source URL` (url), `Reporter` (rich text),
+      `Project` (rich text), `Environment` (rich text) — the last two are filled from the
+      webhook payload when present. Repeated webhooks for the same feedback issue never duplicate
+      the task (deduplicated by Sentry issue ID).
 
 4) **Deploy and point Sentry Webhooks**
    - Backend Sentry project → Webhook URL: `https://<your-app>.vercel.app/api/sentry-backend`
