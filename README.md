@@ -28,9 +28,11 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
    - `SLACK_CHANNEL_FEEDBACK` = `C0789KLMNO` *(optional)* — when set, Sentry **User Feedback** notifications
      are routed to this channel instead; when unset, everything goes to the backend/frontend channels
      as before. Feedback notifications include the reporter's original message.
-   - `SENTRY_AUTH_TOKEN` = `sntrys_...` *(optional)* — when set, screenshots submitted with the
-     feedback widget are fetched from the Sentry API (token needs the `project:read` scope) and
-     attached to the Slack notification; when unset, feedback notifications post without images.
+- `SENTRY_AUTH_TOKEN` = `sntrys_...` *(optional)* — when set, screenshots submitted with the
+      feedback widget are fetched from the Sentry API (token needs the `project:read` scope —
+      personal tokens only, the attachments endpoint rejects org tokens) and attached to the
+      Slack notification and, when the Notion variables are set, to the created Notion task;
+      when unset, feedback notifications post without images.
    - `SENTRY_WEBHOOK_TOKEN` = `<random string>` *(optional)* — when set, the endpoints only accept
      webhook requests presenting this token (as `?token=...` in the URL, an `X-Webhook-Token`
      header, or an `Authorization: Bearer` header); everything else gets `401`. When unset, all
