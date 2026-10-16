@@ -587,15 +587,6 @@ function buildNotionPage(info) {
 
     const children = [];
     if (info.message) children.push(messageParagraph(info.message));
-    if (reporter) {
-        children.push({type: "paragraph", paragraph: {rich_text: [textBlock(`From: ${reporter}`)]}});
-    }
-    if (info.sourceUrl) {
-        children.push({type: "paragraph", paragraph: {rich_text: [
-            textBlock("Submitted from: "),
-            textBlock(info.sourceUrl, info.sourceUrl),
-        ]}});
-    }
     if (info.issueUrl) {
         children.push({type: "paragraph", paragraph: {rich_text: [
             textBlock("Open in Sentry: "),
