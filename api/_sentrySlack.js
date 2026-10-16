@@ -563,13 +563,15 @@ function extractFeedbackInfo(body) {
 
 // Notion rich_text caps each text object at 2000 chars and feedback messages
 // can reach ~4000, so long messages split across objects of one paragraph.
+// Block content nests under the block-type key (paragraph), unlike property
+// values which hold rich_text directly.
 function messageParagraph(message) {
     const normalized = message.replace(/\r\n?/g, "\n");
     const richText = [];
     for (let i = 0; i < normalized.length; i += 2000) {
         richText.push({type: "text", text: {content: normalized.slice(i, i + 2000)}});
     }
-    return {type: "paragraph", rich_text: richText};
+    return {type: "paragraph", paragraph: {rich_text: richText}};
 }
 
 function textBlock(content, link) {
@@ -582,19 +584,19 @@ function buildNotionPage(info) {
     const children = [];
     if (info.message) children.push(messageParagraph(info.message));
     if (reporter) {
-        children.push({type: "paragraph", rich_text: [textBlock(`From: ${reporter}`)]});
+        children.push({type: "paragraph", paragraph: {rich_text: [textBlock(`From: ${reporter}`)]}});
     }
     if (info.sourceUrl) {
-        children.push({type: "paragraph", rich_text: [
+        children.push({type: "paragraph", paragraph: {rich_text: [
             textBlock("Submitted from: "),
             textBlock(info.sourceUrl, info.sourceUrl),
-        ]});
+        ]}});
     }
     if (info.issueUrl) {
-        children.push({type: "paragraph", rich_text: [
+        children.push({type: "paragraph", paragraph: {rich_text: [
             textBlock("Open in Sentry: "),
             textBlock(info.issueUrl, info.issueUrl),
-        ]});
+        ]}});
     }
 
     const properties = {
