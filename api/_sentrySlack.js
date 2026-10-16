@@ -1,5 +1,7 @@
 // api/_sentrySlack.js
 
+import {timingSafeEqual} from "node:crypto";
+
 export const config = {
     api: {bodyParser: {sizeLimit: "2mb"}},
 };
@@ -488,10 +490,151 @@ async function postToSlackWithScreenshot(channel, payload, screenshot) {
     return doneData;
 }
 
-// Entry point for the endpoint handlers. Screenshot failures fall back to the
-// plain post so they can never swallow the notification itself.
+// --- Notion feedback board (optional, needs NOTION_TOKEN + NOTION_FEEDBACK_DB_ID) ---
+// When both variables are set, every User Feedback webhook is also created as
+// a task in the Notion database. Sentry delivers webhooks at-least-once and
+// the Notion API has no idempotent create, so tasks are deduplicated by
+// Sentry issue ID. Notion failures only log — they can never break the Slack
+// notification.
+const NOTION_API = "https://api.notion.com/v1";
+const NOTION_VERSION = "2022-06-28"; // long-stable API line: parent.database_id + /databases/{id}/query
+
+function notionEnabled() {
+    return Boolean(process.env.NOTION_TOKEN && process.env.NOTION_FEEDBACK_DB_ID);
+}
+
+async function notionFetch(path, body) {
+    const resp = await fetch(`${NOTION_API}${path}`, {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+        const detail = await resp.text().catch(() => "");
+        throw new Error(`Notion ${path} failed: ${resp.status} ${detail}`);
+    }
+    return resp.json().catch(() => ({}));
+}
+
+// Extracts the fields the Notion task needs. Mirrors the parsing in
+// formatSlackMessage but keeps data the Slack message deliberately doesn't
+// use (email, issue id, the page the feedback was submitted from).
+function extractFeedbackInfo(body) {
+    const ev = body?.data?.event ?? {};
+    const issue =
+        body?.data?.issue ??
+        ((!body?.data?.event && body?.id && body?.title) ? body : null);
+    const fbCtx = ev?.contexts?.feedback ?? ev?.user_report ?? null;
+    const tag = (name) =>
+        (Array.isArray(ev?.tags) && ev.tags.find(t => t[0] === name)?.[1]) || undefined;
+
+    const message = firstText(
+        fbCtx?.message,
+        fbCtx?.comments,
+        issue?.metadata?.message,
+        issue?.metadata?.value,
+    );
+
+    const title = issue?.title || ev.title || ev.message || "User Feedback";
+    const subjectMatch = /^User Feedback(?::\s*(.*))?$/i.exec(title);
+    const subject = subjectMatch
+        ? (subjectMatch[1] ||
+            (message ? message.replace(/\r\n?/g, "\n").split("\n")[0].slice(0, 100) : "") ||
+            "User Feedback")
+        : title;
+
+    return {
+        issueId: String(issue?.id ?? issue?.shortId ?? ev?.event_id ?? ""),
+        subject,
+        message,
+        name: firstText(fbCtx?.name, issue?.metadata?.name),
+        email: firstText(fbCtx?.contact_email, issue?.metadata?.contact_email, ev?.user?.email),
+        sourceUrl: firstText(fbCtx?.url, ev?.request?.url, tag("url")),
+        issueUrl: firstText(issue?.permalink, issue?.web_url, ev?.web_url),
+    };
+}
+
+// Notion rich_text caps each text object at 2000 chars and feedback messages
+// can reach ~4000, so long messages split across objects of one paragraph.
+function messageParagraph(message) {
+    const normalized = message.replace(/\r\n?/g, "\n");
+    const richText = [];
+    for (let i = 0; i < normalized.length; i += 2000) {
+        richText.push({type: "text", text: {content: normalized.slice(i, i + 2000)}});
+    }
+    return {type: "paragraph", rich_text: richText};
+}
+
+function textBlock(content, link) {
+    return {type: "text", text: {content, ...(link ? {link: {url: link}} : {})}};
+}
+
+function buildNotionPage(info) {
+    const reporter = [info.name, info.email].filter(Boolean).join(" • ");
+
+    const children = [];
+    if (info.message) children.push(messageParagraph(info.message));
+    if (reporter) {
+        children.push({type: "paragraph", rich_text: [textBlock(`From: ${reporter}`)]});
+    }
+    if (info.sourceUrl) {
+        children.push({type: "paragraph", rich_text: [
+            textBlock("Submitted from: "),
+            textBlock(info.sourceUrl, info.sourceUrl),
+        ]});
+    }
+    if (info.issueUrl) {
+        children.push({type: "paragraph", rich_text: [
+            textBlock("Open in Sentry: "),
+            textBlock(info.issueUrl, info.issueUrl),
+        ]});
+    }
+
+    const properties = {
+        Name: {title: [textBlock(info.subject)]},
+        Status: {select: {name: "New"}},
+    };
+    if (info.issueId) properties["Sentry Issue ID"] = {rich_text: [textBlock(info.issueId)]};
+    if (info.sourceUrl) properties["Source URL"] = {url: info.sourceUrl};
+    if (reporter) properties.Reporter = {rich_text: [textBlock(reporter)]};
+
+    return {properties, children};
+}
+
+async function syncNotionFeedbackTask(body) {
+    if (!notionEnabled() || !isFeedback({body})) return;
+    try {
+        const info = extractFeedbackInfo(body);
+
+        if (info.issueId) {
+            const existing = await notionFetch(
+                `/databases/${process.env.NOTION_FEEDBACK_DB_ID}/query`,
+                {filter: {property: "Sentry Issue ID", rich_text: {equals: info.issueId}}, page_size: 1},
+            );
+            if (Array.isArray(existing.results) && existing.results.length > 0) return;
+        }
+
+        const {properties, children} = buildNotionPage(info);
+        await notionFetch("/pages", {
+            parent: {database_id: process.env.NOTION_FEEDBACK_DB_ID},
+            properties,
+            children,
+        });
+    } catch (err) {
+        console.error("notion feedback task skipped:", err);
+    }
+}
+
+// Entry point for the endpoint handlers. Notion task sync and screenshot
+// failures fall back to the plain post so they can never swallow the
+// notification itself.
 export async function notifySlack(channel, body) {
     const payload = formatSlackMessage(body || {});
+    await syncNotionFeedbackTask(body || {});
     try {
         const screenshot = await fetchFeedbackScreenshot(body || {});
         if (screenshot) return await postToSlackWithScreenshot(channel, payload, screenshot);
@@ -499,6 +642,31 @@ export async function notifySlack(channel, body) {
         console.error("feedback screenshot skipped:", err);
     }
     return postToSlack(channel, payload);
+}
+
+// --- Static-token auth (optional, needs SENTRY_WEBHOOK_TOKEN) ---
+// Sentry webhook settings only let you control the request URL (there's no
+// way to add custom headers), so the token rides in the webhook URL as
+// ?token=... — a Bearer or X-Webhook-Token header is accepted too for senders
+// that can set them. Unset variable = guard disabled, preserving existing
+// deployments.
+export function authGuard(req, res) {
+    const expected = process.env.SENTRY_WEBHOOK_TOKEN;
+    if (!expected) return true;
+
+    const authHeader = req?.headers?.authorization;
+    const presented =
+        req?.query?.token ||
+        req?.headers?.["x-webhook-token"] ||
+        (typeof authHeader === "string" ? (/^Bearer\s+(.+)$/i.exec(authHeader.trim()) || [])[1] : undefined);
+
+    const expectedBuf = Buffer.from(expected);
+    const presentedBuf = Buffer.from(String(presented ?? ""));
+    if (presentedBuf.length !== expectedBuf.length || !timingSafeEqual(presentedBuf, expectedBuf)) {
+        res.status(401).json({error: "Unauthorized"});
+        return false;
+    }
+    return true;
 }
 
 export function methodGuard(req, res) {
