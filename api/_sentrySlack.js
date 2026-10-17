@@ -443,15 +443,19 @@ async function postToSlackWithScreenshot(channel, payload, screenshot) {
     const token = process.env.SLACK_APP_AUTH_TOKEN;
     if (!token) throw new Error("Missing SLACK_APP_AUTH_TOKEN");
 
+    // Form-encoded on purpose: JSON bodies are documented as accepted here,
+    // but real-world reports show them tripping invalid_arguments on this
+    // method (see slackapi/bolt-js#2115) — both Slack SDKs send urlencoded
+    // on the wire.
     const urlResp = await fetch("https://slack.com/api/files.getUploadURLExternal", {
         method: "POST",
         headers: {
             Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json; charset=utf-8",
+            "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: JSON.stringify({
+        body: new URLSearchParams({
             filename: screenshot.filename,
-            length: screenshot.buffer.length,
+            length: String(screenshot.buffer.length),
             alt_txt: "Feedback screenshot",
         }),
     });
@@ -583,15 +587,6 @@ function buildNotionPage(info) {
 
     const children = [];
     if (info.message) children.push(messageParagraph(info.message));
-    if (reporter) {
-        children.push({type: "paragraph", paragraph: {rich_text: [textBlock(`From: ${reporter}`)]}});
-    }
-    if (info.sourceUrl) {
-        children.push({type: "paragraph", paragraph: {rich_text: [
-            textBlock("Submitted from: "),
-            textBlock(info.sourceUrl, info.sourceUrl),
-        ]}});
-    }
     if (info.issueUrl) {
         children.push({type: "paragraph", paragraph: {rich_text: [
             textBlock("Open in Sentry: "),
@@ -612,8 +607,11 @@ function buildNotionPage(info) {
     return {properties, children};
 }
 
+// Returns the created page id (null when skipped) so the screenshot attaches
+// only to a page created in the same request — webhook retries would
+// otherwise duplicate image blocks.
 async function syncNotionFeedbackTask(body) {
-    if (!notionEnabled() || !isFeedback({body})) return;
+    if (!notionEnabled() || !isFeedback({body})) return null;
     try {
         const info = extractFeedbackInfo(body);
 
@@ -622,17 +620,70 @@ async function syncNotionFeedbackTask(body) {
                 `/databases/${process.env.NOTION_FEEDBACK_DB_ID}/query`,
                 {filter: {property: "Sentry Issue ID", rich_text: {equals: info.issueId}}, page_size: 1},
             );
-            if (Array.isArray(existing.results) && existing.results.length > 0) return;
+            if (Array.isArray(existing.results) && existing.results.length > 0) return null;
         }
 
         const {properties, children} = buildNotionPage(info);
-        await notionFetch("/pages", {
+        const page = await notionFetch("/pages", {
             parent: {database_id: process.env.NOTION_FEEDBACK_DB_ID},
             properties,
             children,
         });
+        return page.id || null;
     } catch (err) {
         console.error("notion feedback task skipped:", err);
+        return null;
+    }
+}
+
+const NOTION_IMAGE_TYPES = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp"};
+
+// Notion has no URL-based image ingest, so the screenshot bytes go through
+// the File Upload API: create an upload, POST the bytes to its upload_url
+// (the /file_uploads/{id}/send endpoint wants multipart FormData — auth
+// headers still required, FormData sets its own boundary), then reference
+// the upload id in an image block appended to the task page. These additive
+// endpoints work on the pinned 2022-06-28 version, and an unattached upload
+// expires after an hour, so the image is attached right away.
+async function attachNotionScreenshot(pageId, screenshot) {
+    const ext = (/\.([a-z0-9]+)$/i.exec(screenshot.filename) || [])[1]?.toLowerCase();
+    const contentType = NOTION_IMAGE_TYPES[ext] || "image/png";
+
+    const created = await notionFetch("/file_uploads", {
+        filename: screenshot.filename,
+        content_type: contentType,
+    });
+    if (!created.id || !created.upload_url) throw new Error("Notion file upload was not created");
+
+    const form = new FormData();
+    form.append("file", new Blob([screenshot.buffer], {type: contentType}), screenshot.filename);
+    const sentResp = await fetch(created.upload_url, {
+        method: "POST",
+        headers: {
+            Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+            "Notion-Version": NOTION_VERSION,
+        },
+        body: form,
+    });
+    if (!sentResp.ok) {
+        throw new Error(`Notion ${created.upload_url} failed: ${sentResp.status} ${await sentResp.text().catch(() => "")}`);
+    }
+
+    const attached = await fetch(`${NOTION_API}/blocks/${pageId}/children`, {
+        method: "PATCH",
+        headers: {
+            Authorization: `Bearer ${process.env.NOTION_TOKEN}`,
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({children: [{
+            object: "block",
+            type: "image",
+            image: {type: "file_upload", file_upload: {id: created.id}},
+        }]}),
+    });
+    if (!attached.ok) {
+        throw new Error(`Notion /blocks/${pageId}/children failed: ${attached.status} ${await attached.text().catch(() => "")}`);
     }
 }
 
@@ -641,10 +692,19 @@ async function syncNotionFeedbackTask(body) {
 // notification itself.
 export async function notifySlack(channel, body) {
     const payload = formatSlackMessage(body || {});
-    await syncNotionFeedbackTask(body || {});
+    const notionPageId = await syncNotionFeedbackTask(body || {});
     try {
         const screenshot = await fetchFeedbackScreenshot(body || {});
-        if (screenshot) return await postToSlackWithScreenshot(channel, payload, screenshot);
+        if (screenshot) {
+            if (notionPageId) {
+                try {
+                    await attachNotionScreenshot(notionPageId, screenshot);
+                } catch (err) {
+                    console.error("notion screenshot skipped:", err);
+                }
+            }
+            return await postToSlackWithScreenshot(channel, payload, screenshot);
+        }
     } catch (err) {
         console.error("feedback screenshot skipped:", err);
     }
