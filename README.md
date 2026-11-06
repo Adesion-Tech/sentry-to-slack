@@ -1,13 +1,17 @@
 
 # Sentry → Slack (Vercel, Slack Bot token)
 
-Two endpoints that receive Sentry webhooks and send formatted alerts to Slack **using a Slack App Bot token** (via `chat.postMessage`). Two optional extras: webhook requests can require a shared secret token, and every Sentry **User Feedback** notification can also be created as a task in a Notion database — see the environment variables below.
+Endpoints that receive Sentry webhooks and send formatted alerts to Slack **using a Slack App Bot token** (via `chat.postMessage`). Two optional extras: webhook requests can require a shared secret token, and every Sentry **User Feedback** notification can also be created as a task in a Notion database — see the environment variables below.
 
 ## Endpoints
 - `api/sentry-backend.js` → for your backend project
 - `api/sentry-frontend.js` → for your frontend project
+- `api/sentry-demo-backend.js` / `api/sentry-demo-frontend.js` → for the demo environment's Sentry
+  projects (separate GCP/Firebase/Sentry projects). Every demo notification — errors and user
+  feedback, backend and frontend — goes to the single `SLACK_CHANNEL_DEMO` channel, and demo
+  feedback never creates Notion tasks.
 
-Both reuse the shared helper in `api/_sentrySlack.js`.
+All reuse the shared helper in `api/_sentrySlack.js`.
 
 ## Setup
 
@@ -25,6 +29,8 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
    - `SLACK_APP_AUTH_TOKEN` = `xoxb-...`
    - `SLACK_CHANNEL_BACKEND` = `C0123ABCDE`
    - `SLACK_CHANNEL_FRONTEND` = `C0456FGHIJ`
+   - `SLACK_CHANNEL_DEMO` = `C0...` *(only for the demo endpoints)* — the one channel for all demo
+     notifications; `SLACK_CHANNEL_FEEDBACK` does not apply to demo.
    - `SLACK_CHANNEL_FEEDBACK` = `C0789KLMNO` *(optional)* — when set, Sentry **User Feedback** notifications
      are routed to this channel instead; when unset, everything goes to the backend/frontend channels
      as before. Feedback notifications include the reporter's original message.
@@ -51,7 +57,9 @@ Both reuse the shared helper in `api/_sentrySlack.js`.
 4) **Deploy and point Sentry Webhooks**
    - Backend Sentry project → Webhook URL: `https://<your-app>.vercel.app/api/sentry-backend`
    - Frontend Sentry project → Webhook URL: `https://<your-app>.vercel.app/api/sentry-frontend`
-   - With `SENTRY_WEBHOOK_TOKEN` set, append the token to both webhook URLs (Sentry webhooks
+   - Demo backend / frontend Sentry projects → `https://<your-app>.vercel.app/api/sentry-demo-backend`
+     / `https://<your-app>.vercel.app/api/sentry-demo-frontend`
+   - With `SENTRY_WEBHOOK_TOKEN` set, append the token to every webhook URL (Sentry webhooks
      can't send custom headers, so the token rides in the query string), e.g.
      `https://<your-app>.vercel.app/api/sentry-frontend?token=<your-secret>`
 
