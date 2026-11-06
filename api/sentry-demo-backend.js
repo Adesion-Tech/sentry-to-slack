@@ -1,7 +1,7 @@
 // api/sentry-demo-backend.js
-// Demo lives in its own GCP/Firebase/Sentry project: every demo notification,
-// feedback included, goes to the single SLACK_CHANNEL_DEMO channel and never
-// lands on the production Notion board.
+// Demo lives in its own GCP/Firebase/Sentry project: every Slack notification,
+// feedback included, goes to the single SLACK_CHANNEL_DEMO channel. Feedback
+// still creates tasks on the shared Notion board.
 import {authGuard, config as sharedConfig, methodGuard, notifySlack} from "./_sentrySlack.js";
 
 export const config = sharedConfig;
@@ -14,7 +14,7 @@ export default async function handler(req, res) {
     if (!channel) return res.status(500).json({error: "Missing SLACK_CHANNEL_DEMO"});
 
     try {
-        await notifySlack(channel, req.body || {}, {notion: false});
+        await notifySlack(channel, req.body || {});
 
         res.status(200).json({ok: true});
     } catch (err) {

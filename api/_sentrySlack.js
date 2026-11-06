@@ -690,9 +690,9 @@ async function attachNotionScreenshot(pageId, screenshot) {
 // Entry point for the endpoint handlers. Notion task sync and screenshot
 // failures fall back to the plain post so they can never swallow the
 // notification itself.
-export async function notifySlack(channel, body, {notion = true} = {}) {
+export async function notifySlack(channel, body) {
     const payload = formatSlackMessage(body || {});
-    const notionPageId = notion ? await syncNotionFeedbackTask(body || {}) : null;
+    const notionPageId = await syncNotionFeedbackTask(body || {});
     try {
         const screenshot = await fetchFeedbackScreenshot(body || {});
         if (screenshot) {

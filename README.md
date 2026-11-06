@@ -8,8 +8,9 @@ Endpoints that receive Sentry webhooks and send formatted alerts to Slack **usin
 - `api/sentry-frontend.js` → for your frontend project
 - `api/sentry-demo-backend.js` / `api/sentry-demo-frontend.js` → for the demo environment's Sentry
   projects (separate GCP/Firebase/Sentry projects). Every demo notification — errors and user
-  feedback, backend and frontend — goes to the single `SLACK_CHANNEL_DEMO` channel, and demo
-  feedback never creates Notion tasks.
+  feedback, backend and frontend — goes to the single `SLACK_CHANNEL_DEMO` channel. Demo
+  feedback still creates tasks in the same Notion database (the `Project` / `Environment`
+  columns tell them apart).
 
 All reuse the shared helper in `api/_sentrySlack.js`.
 
